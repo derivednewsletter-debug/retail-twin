@@ -76,7 +76,7 @@ class AIService:
         self.timeout = httpx.Timeout(timeout_seconds, connect=5.0)
         self.transport = transport
 
-    def _api_key(self, config: ProviderConfig) -> str | None:
+    def _api_key(self, config: ProviderConfig) -> Optional[str]:
         for env_var in config.env_vars:
             value = os.getenv(env_var, "").strip()
             if value:
