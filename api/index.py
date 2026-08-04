@@ -25,14 +25,24 @@ from pydantic import BaseModel, Field, field_validator
 # Import from sibling modules
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
 
-from data_services import (
-    build_simulation_context, SimulationContext,
-    HOURLY_PATTERN, CATEGORY_HOUR_CURVES,
-)
-from ai_content import AIContentGenerator
-from analytics import analytics_store
+# Ensure sibling modules are importable
+_api_dir = os.path.dirname(os.path.abspath(__file__))
+if _api_dir not in sys.path:
+    sys.path.insert(0, _api_dir)
+
+try:
+    from data_services import (
+        build_simulation_context, SimulationContext,
+        HOURLY_PATTERN, CATEGORY_HOUR_CURVES,
+    )
+    from ai_content import AIContentGenerator
+    from analytics import analytics_store
+except ImportError as e:
+    # Fallback: provide minimal stubs if imports fail
+    import traceback
+    traceback.print_exc()
+    raise
 
 load_dotenv()
 
@@ -505,6 +515,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Retail Twin API", version="0.3.0", lifespan=lifespan)
+
+# Wrap for Vercel Lambda runtime
+try:
+    from mangum import Mangum
+    handler = Mangum(app)
+except ImportError:
+    handler = None
 
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip()
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
