@@ -1,8 +1,8 @@
 {
-  "buildCommand": "cd api && pip install -r requirements.txt && cd ../frontend && npm install && npm run build",
-  "outputDirectory": "frontend/dist",
-  "installCommand": "npm install --prefix frontend",
   "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "installCommand": "npm install",
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/main.py" }
   ],
