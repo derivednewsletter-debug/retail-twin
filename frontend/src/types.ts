@@ -115,3 +115,37 @@ export interface Snapshot {
   real_world_modifier?: number
   data_sources?: DataSources
 }
+
+export interface DailyTrend {
+  day: number
+  avg_revenue: number
+  total_revenue: number
+  avg_traffic: number
+  weather: string
+  weather_mod: number
+  transit_mod: number
+}
+
+export interface WeatherPattern {
+  condition: string
+  avg_revenue: number
+  avg_traffic: number
+  impact_pct: number
+  samples: number
+}
+
+export interface DayOfWeekPattern {
+  day: string
+  index: number
+  avg_revenue: number
+  avg_traffic: number
+  impact_pct: number
+  samples: number
+}
+
+export interface HourlyPattern {
+  hour: number
+  avg_revenue: number
+  avg_traffic: number
+  samples: number
+}

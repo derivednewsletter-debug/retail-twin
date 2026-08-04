@@ -6,9 +6,9 @@ import {
   Clock3, Coffee, Gauge, Layers3, MapPin, Pause, Play, Radio, RotateCcw, Search,
   Sparkles, Store, Target, TrendingUp, Users, Zap,
 } from 'lucide-react'
-import { changeSimulationSpeed, configureScenario, generateAIInsight, getAIStatus, getSnapshot, simulationCommand } from './api'
-import type { AIStatus } from './api'
-import type { LayerKey, ScenarioConfig, Snapshot, WeatherInfo, TransitInfo } from './types'
+import { changeSimulationSpeed, configureScenario, generateAIInsight, getAIStatus, getSnapshot, simulationCommand, getAnalytics, resetAnalytics } from './api'
+import type { AIStatus, AnalyticsSummary } from './api'
+import type { LayerKey, ScenarioConfig, Snapshot, WeatherInfo, TransitInfo, DailyTrend, WeatherPattern, DayOfWeekPattern } from './types'
 import './styles.css'
 
 const initialConfig: ScenarioConfig = {
@@ -41,7 +41,7 @@ function money(value: number, compact = false) {
 function App() {
   const [config, setConfig] = useState<ScenarioConfig>(initialConfig)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
-  const [view, setView] = useState<'setup' | 'simulation' | 'report'>('setup')
+  const [view, setView] = useState<'setup' | 'simulation' | 'report' | 'analytics'>('setup')
   const [step, setStep] = useState(0)
   const [speed, setSpeed] = useState(10)
   const [activeLayer, setActiveLayer] = useState<LayerKey>('footTraffic')
@@ -50,6 +50,7 @@ function App() {
   const [error, setError] = useState('')
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
   const [aiBrief, setAiBrief] = useState<{ provider: string; content: string; used_fallback: boolean } | null>(null)
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null)
 
   useEffect(() => {
     if (view !== 'simulation') return
@@ -77,6 +78,11 @@ function App() {
   useEffect(() => {
     if (view === 'setup') return
     getAIStatus().then(setAiStatus).catch(() => setAiStatus(null))
+  }, [view])
+
+  useEffect(() => {
+    if (view !== 'analytics') return
+    getAnalytics().then(setAnalytics).catch(() => setAnalytics(null))
   }, [view])
 
   const selectedMetric = snapshot?.locations.find((location) => location.id === selectedLocation) ?? snapshot?.locations[0]
@@ -148,6 +154,7 @@ function App() {
             <div className="sidebar-label">WORKSPACE</div>
             <button className={view === 'simulation' ? 'nav-item active' : 'nav-item'} onClick={() => setView('simulation')}><Activity size={17} />Live simulation <span className="nav-live" /></button>
             <button className={view === 'report' ? 'nav-item active' : 'nav-item'} onClick={() => setView('report')}><BarChart3 size={17} />Executive report</button>
+            <button className={view === 'analytics' ? 'nav-item active' : 'nav-item'} onClick={() => setView('analytics')}><TrendingUp size={17} />Analytics</button>
             <div className="sidebar-rule" />
             <div className="sidebar-label">SCENARIO</div>
             <div className="scenario-mini"><div className="scenario-icon"><Coffee size={17} /></div><div><b>{config.brand_name}</b><span>{config.category}</span></div><Check size={15} className="check-icon" /></div>
@@ -158,7 +165,7 @@ function App() {
             <div className="sidebar-foot"><div className="system-status"><span className={`status-dot ${polling ? 'live' : 'offline'}`} /> Engine {polling ? 'polling' : 'offline'}</div><span className="version">v0.1 MVP</span></div>
           </aside>
           {error && <div className="error-banner">{error}</div>}
-          {view === 'simulation' ? <Simulation snapshot={snapshot} selectedMetric={selectedMetric} selectedLocation={selectedLocation} setSelectedLocation={setSelectedLocation} activeLayer={activeLayer} setActiveLayer={setActiveLayer} speed={speed} setSpeed={updateSpeed} toggleSimulation={toggleSimulation} resetSimulation={resetSimulation} setView={setView} aiStatus={aiStatus} /> : <Report snapshot={snapshot} bestLocation={bestLocation} brand={config.brand_name} setView={setView} aiStatus={aiStatus} aiBrief={aiBrief} />}
+          {view === 'simulation' ? <Simulation snapshot={snapshot} selectedMetric={selectedMetric} selectedLocation={selectedLocation} setSelectedLocation={setSelectedLocation} activeLayer={activeLayer} setActiveLayer={setActiveLayer} speed={speed} setSpeed={updateSpeed} toggleSimulation={toggleSimulation} resetSimulation={resetSimulation} setView={setView} aiStatus={aiStatus} /> : view === 'analytics' ? <Analytics data={analytics} setView={setView} onRefresh={() => getAnalytics().then(setAnalytics).catch(() => {})} onReset={() => resetAnalytics().then(() => setAnalytics(null)).catch(() => {})} /> : <Report snapshot={snapshot} bestLocation={bestLocation} brand={config.brand_name} setView={setView} aiStatus={aiStatus} aiBrief={aiBrief} />}
         </main>
       )}
     </div>
@@ -208,6 +215,83 @@ function Kpi({ label, value, delta, icon }: { label: string; value: string; delt
 function Metric({ label, value, bar }: { label: string; value: string; bar: number }) { return <div className="metric"><div><span>{label}</span><b>{value}</b></div><div className="metric-bar"><i style={{ width: `${Math.min(100, bar)}%` }} /></div></div> }
 function Feed({ snapshot }: { snapshot: Snapshot | null }) { return <div className="feed-card"><div className="card-header compact"><div><span className="card-label">CONSUMER FEED</span><h3>What the neighborhood is saying</h3></div><span className="feed-count"><span className="tiny-live" /> LIVE</span></div><div className="feed-list">{snapshot?.feed.map((item) => <div className="feed-item" key={item.id}><div className={`feed-avatar ${item.sentiment}`}>{item.avatar}</div><div><p><b>{item.name}</b> {item.text}</p><span>{item.time} <i>·</i> <em>{item.sentiment}</em></span></div></div>)}</div></div> }
 function Competitors({ snapshot }: { snapshot: Snapshot | null }) { return <div className="feed-card"><div className="card-header compact"><div><span className="card-label">COMPETITOR INTELLIGENCE</span><h3>Market reactions</h3></div><button className="icon-button small"><Layers3 size={15} /></button></div><div className="competitor-list">{snapshot?.competitor_events.map((item) => <div className="competitor-item" key={item.id}><div className="competitor-icon"><Building2 size={15} /></div><div><p><b>{item.competitor}</b> {item.text}</p><span>{item.time}</span></div><span className="event-kind">{item.kind}</span></div>)}</div></div> }
+
+function Analytics({ data, setView, onRefresh, onReset }: { data: AnalyticsSummary | null; setView: (v: 'setup' | 'simulation' | 'report' | 'analytics') => void; onRefresh: () => void; onReset: () => void }) {
+  if (!data || data.total_snapshots === 0) {
+    return <section className="analytics-page">
+      <div className="page-heading"><div><div className="eyebrow muted"><TrendingUp size={14} />HISTORICAL ANALYTICS</div><h1>No data yet.</h1><p>Run a simulation to start collecting historical analytics.</p></div><div className="simulation-actions"><button className="secondary-button" onClick={() => setView('simulation')}><ChevronLeft size={15} /> Back to twin</button></div></div>
+      <div className="analytics-empty"><p>Start a simulation and the analytics engine will automatically record snapshots for weather patterns, day-of-week effects, and hourly trends.</p></div>
+    </section>
+  }
+
+  const maxRevenue = Math.max(...data.daily_trend.map(d => d.avg_revenue), 1)
+  const maxTraffic = Math.max(...data.daily_trend.map(d => d.avg_traffic), 1)
+  const weatherCondEmoji: Record<string, string> = { clear: '☀️', overcast: '☁️', rain: '🌧️', drizzle: '🌦️', snow: '❄️', hot: '🔥', cold: '🥶', fog: '🌫️', thunderstorm: '⛈️' }
+  const dowColors = ['#f9b44b', '#fb7185', '#9b8afd', '#62d9a5', '#38bdf8', '#f472b6', '#a78bfa']
+
+  return <section className="analytics-page">
+    <div className="page-heading"><div><div className="eyebrow muted"><TrendingUp size={14} />HISTORICAL ANALYTICS</div><h1>Patterns in the data.</h1><p>{data.total_snapshots} snapshots across {data.simulation_days_covered} simulated days.</p></div><div className="simulation-actions"><button className="secondary-button" onClick={onRefresh}><RotateCcw size={15} /> Refresh</button><button className="secondary-button" onClick={() => setView('simulation')}><ChevronLeft size={15} /> Back to twin</button></div></div>
+
+    <div className="analytics-summary"><div className="summary-card"><span>AVG DAILY REVENUE</span><strong>{money(data.overall_avg_revenue)}</strong></div><div className="summary-card"><span>TOTAL SIMULATED</span><strong>{money(data.overall_total_revenue, true)}</strong></div><div className="summary-card"><span>PEAK DAY</span><strong>Day {data.peak_revenue_day}</strong></div><div className="summary-card"><span>PEAK HOUR</span><strong>{String(data.peak_revenue_hour).padStart(2, '0')}:00</strong></div></div>
+
+    <div className="analytics-insight"><Zap size={16} /><p>{data.key_insight}</p></div>
+
+    <div className="analytics-grid">
+      <div className="analytics-card">
+        <div className="card-header compact"><div><span className="card-label">DAILY REVENUE TREND</span><h3>30-day performance curve</h3></div></div>
+        <div className="chart-area"><svg viewBox="0 0 600 200" className="line-chart">
+          <defs><linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--orange)" stopOpacity="0.3" /><stop offset="100%" stopColor="var(--orange)" stopOpacity="0" /></linearGradient></defs>
+          {data.daily_trend.map((d, i) => {
+            const x = (i / Math.max(1, data.daily_trend.length - 1)) * 580 + 10
+            const y = 190 - (d.avg_revenue / maxRevenue) * 170
+            return <g key={d.day}><line x1={x} y1={190} x2={x} y2={y} stroke="var(--orange)" strokeWidth="2" opacity="0.3" /><circle cx={x} cy={y} r="3" fill="var(--orange)" /><text x={x} y={198} textAnchor="middle" fill="#666872" fontSize="7">{d.day}</text></g>
+          })}
+          {data.daily_trend.length > 1 && <polyline points={data.daily_trend.map((d, i) => { const x = (i / Math.max(1, data.daily_trend.length - 1)) * 580 + 10; const y = 190 - (d.avg_revenue / maxRevenue) * 170; return `${x},${y}`; }).join(' ')} fill="none" stroke="var(--orange)" strokeWidth="2" />}
+        </svg></div>
+      </div>
+
+      <div className="analytics-card">
+        <div className="card-header compact"><div><span className="card-label">WEATHER IMPACT</span><h3>How weather drives revenue</h3></div></div>
+        <div className="chart-area"><div className="insight-text">{data.weather_impact_summary}</div>
+          <div className="bar-chart">
+            {data.weather_patterns.map((w) => {
+              const pct = Math.max(5, (w.avg_revenue / Math.max(...data.weather_patterns.map(p => p.avg_revenue), 1)) * 100)
+              const isPositive = w.impact_pct >= 0
+              return <div className="bar-row" key={w.condition}><span className="bar-label">{weatherCondEmoji[w.condition] ?? '🌤️'} {w.condition}</span><div className="bar-track"><div className="bar-fill" style={{ width: `${pct}%`, background: isPositive ? 'var(--green)' : 'var(--red)' }} /></div><span className={`bar-value ${isPositive ? 'positive' : 'negative'}`}>{w.impact_pct >= 0 ? '+' : ''}{w.impact_pct}%</span></div>
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="analytics-card">
+        <div className="card-header compact"><div><span className="card-label">DAY OF WEEK PATTERNS</span><h3>Which days perform best</h3></div></div>
+        <div className="chart-area"><div className="insight-text">{data.dow_impact_summary}</div>
+          <div className="bar-chart">
+            {data.day_of_week.map((d, i) => {
+              const pct = Math.max(5, (d.avg_revenue / Math.max(...data.day_of_week.map(p => p.avg_revenue), 1)) * 100)
+              const isPositive = d.impact_pct >= 0
+              return <div className="bar-row" key={d.day}><span className="bar-label" style={{ color: dowColors[i] }}>{d.day.slice(0, 3)}</span><div className="bar-track"><div className="bar-fill" style={{ width: `${pct}%`, background: dowColors[i] }} /></div><span className={`bar-value ${isPositive ? 'positive' : 'negative'}`}>{d.impact_pct >= 0 ? '+' : ''}{d.impact_pct}%</span></div>
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="analytics-card">
+        <div className="card-header compact"><div><span className="card-label">HOURLY REVENUE PATTERN</span><h3>Revenue by hour of day</h3></div></div>
+        <div className="chart-area"><svg viewBox="0 0 600 180" className="line-chart">
+          {data.hourly.map((h) => {
+            const x = (h.hour / 23) * 580 + 10
+            const y = 170 - (h.avg_revenue / Math.max(...data.hourly.map(p => p.avg_revenue), 1)) * 150
+            const barHeight = 170 - y
+            return <g key={h.hour}><rect x={x - 8} y={y} width="16" height={barHeight} fill="var(--purple)" opacity="0.6" rx="2" /><text x={x} y={178} textAnchor="middle" fill="#666872" fontSize="7">{h.hour}</text></g>
+          })}
+        </svg></div>
+      </div>
+    </div>
+
+    <div className="analytics-footer"><button className="secondary-button" onClick={onReset}><RotateCcw size={15} /> Reset analytics data</button></div>
+  </section>
+}
 
 function Report({ snapshot, bestLocation, brand, setView, aiStatus, aiBrief }: { snapshot: Snapshot | null; bestLocation: Snapshot['locations'][number] | undefined; brand: string; setView: (value: 'setup' | 'simulation' | 'report') => void; aiStatus: AIStatus | null; aiBrief: { provider: string; content: string; used_fallback: boolean } | null }) { const rawTrafficLocation = snapshot?.locations.find((location) => location.id === 'A'); const winnerId = bestLocation?.id ?? 'B'; return <section className="report-page"><div className="page-heading"><div><div className="eyebrow muted"><BarChart3 size={14} />EXECUTIVE REPORT · SOHO, MANHATTAN</div><h1>The decision is clearer now.</h1><p>30 simulated days distilled into an expansion recommendation for {brand}.</p></div><button className="secondary-button" onClick={() => setView('simulation')}><ChevronLeft size={15} /> Back to twin</button></div><div className="report-hero"><div><span className="card-label">RECOMMENDED LOCATION</span><h2>Location {bestLocation?.id ?? 'B'} <em>· {bestLocation?.name ?? 'Broadway Subway'}</em></h2><p>{winnerId === 'B' ? 'The subway exit creates a natural pause point.' : 'This location combines the strongest local context with a repeatable customer routine.'} Lower raw traffic, but dramatically stronger intent and repeat behavior.</p></div><div className="recommendation-score"><strong>92</strong><span>confidence<br />score</span></div></div><div className="report-stats"><ReportStat label="EST. ANNUAL REVENUE" value={money(bestLocation?.annual_revenue ?? 0, true)} sub="vs. $3.2M at Location A" /><ReportStat label="EXPECTED DAILY CUSTOMERS" value={(bestLocation?.transactions ?? 0).toLocaleString()} sub="Steady morning + lunch demand" /><ReportStat label="PAYBACK PERIOD" value={`${bestLocation?.payback_months ?? 18} months`} sub="Including build-out + launch" /><ReportStat label="AVERAGE WAIT TIME" value="4 min" sub="Peak: 8 min at 12:15 PM" /></div><div className="report-columns"><div className="report-panel"><span className="card-label">{aiBrief?.used_fallback ? 'DETERMINISTIC BRIEF' : `${aiBrief?.provider.toUpperCase() ?? 'AI'} BRIEF`}</span><h3>Executive readout.</h3><p className="report-note ai-note">{aiBrief?.content ?? 'Generating a provider-aware strategy brief from the simulation results…'}</p><small className="ai-caption">{aiStatus?.mode === 'ai-enabled' ? 'Generated with your configured provider router.' : 'No provider key detected — using the reproducible local fallback.'}</small></div><div className="report-panel"><span className="card-label">WHY LOCATION {winnerId} WINS</span><h3>Intent beats impressions.</h3><div className="comparison"><div className="compare-row"><span>Location A · raw traffic</span><div><i style={{ width: `${Math.min(100, (rawTrafficLocation?.foot_traffic ?? 24500) / 260)}%` }} /></div><b>{((rawTrafficLocation?.foot_traffic ?? 24500) / 1000).toFixed(1)}K</b></div><div className="compare-row winner"><span>Location {winnerId} · conversion</span><div><i style={{ width: `${Math.min(100, (bestLocation?.conversion_rate ?? 6.8) * 10)}%` }} /></div><b>{bestLocation?.conversion_rate ?? 6.8}%</b></div></div><p className="report-note"><Zap size={15} /> The twin found that commuters at A move too quickly to stop. At {winnerId}, customers naturally slow down, browse, and return.</p></div><div className="report-panel"><span className="card-label">DECISION BRIEF</span><h3>Plan around the pause.</h3><div className="brief-list"><div><span className="brief-dot green" /><p><b>Opportunity</b> Nearby office workers become high-frequency regulars.</p></div><div><span className="brief-dot yellow" /><p><b>Watch</b> Lunch demand will exceed seating on Tuesdays and Thursdays.</p></div><div><span className="brief-dot red" /><p><b>Risk</b> Blank Street loyalty is strongest within a 2-block radius.</p></div></div></div></div></section> }
 function ReportStat({ label, value, sub }: { label: string; value: string; sub: string }) { return <div className="report-stat"><span>{label}</span><strong>{value}</strong><small>{sub}</small></div> }

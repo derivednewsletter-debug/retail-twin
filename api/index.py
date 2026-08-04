@@ -32,6 +32,7 @@ from data_services import (
     HOURLY_PATTERN, CATEGORY_HOUR_CURVES,
 )
 from ai_content import AIContentGenerator
+from analytics import analytics_store
 
 load_dotenv()
 
@@ -551,6 +552,9 @@ async def configure_scenario(config: ScenarioConfig):
 async def get_snapshot():
     if simulation.running:
         await simulation._advance_async()
+        # Record snapshot for analytics
+        snap = simulation.snapshot()
+        analytics_store.record_snapshot(snap, simulation.config.model_dump())
     return simulation.snapshot()
 
 @app.post("/api/simulation/start")
@@ -590,6 +594,31 @@ async def get_nyc_events():
     from data_services import get_nyc_events as fetch_events
     events = await fetch_events()
     return [{"type": e.type, "description": e.description, "neighborhood": e.neighborhood, "severity": e.severity} for e in events]
+
+@app.get("/api/analytics")
+async def get_analytics():
+    summary = analytics_store.get_summary()
+    return {
+        "total_snapshots": summary.total_snapshots,
+        "simulation_days_covered": summary.simulation_days_covered,
+        "date_range": summary.date_range,
+        "overall_avg_revenue": summary.overall_avg_revenue,
+        "overall_total_revenue": summary.overall_total_revenue,
+        "peak_revenue_day": summary.peak_revenue_day,
+        "peak_revenue_hour": summary.peak_revenue_hour,
+        "weather_impact_summary": summary.weather_impact_summary,
+        "dow_impact_summary": summary.dow_impact_summary,
+        "key_insight": summary.key_insight,
+        "daily_trend": [{"day": d.day, "avg_revenue": d.avg_revenue, "total_revenue": d.total_revenue, "avg_traffic": d.avg_foot_traffic, "weather": d.dominant_weather, "weather_mod": d.avg_weather_modifier, "transit_mod": d.avg_transit_modifier} for d in summary.daily_trend],
+        "weather_patterns": [{"condition": w.condition, "avg_revenue": w.avg_revenue, "avg_traffic": w.avg_traffic, "impact_pct": w.revenue_impact_pct, "samples": w.sample_count} for w in summary.weather_patterns],
+        "day_of_week": [{"day": d.day_name, "index": d.day_index, "avg_revenue": d.avg_revenue, "avg_traffic": d.avg_traffic, "impact_pct": d.revenue_impact_pct, "samples": d.sample_count} for d in summary.day_of_week_patterns],
+        "hourly": [{"hour": h.hour, "avg_revenue": h.avg_revenue, "avg_traffic": h.avg_traffic, "samples": h.sample_count} for h in summary.hourly_patterns],
+    }
+
+@app.post("/api/analytics/reset")
+async def reset_analytics():
+    analytics_store._records.clear()
+    return {"status": "ok", "message": "Analytics data cleared"}
 
 @app.get("/api/data/transit")
 async def get_transit():

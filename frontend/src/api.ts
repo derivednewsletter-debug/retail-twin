@@ -80,5 +80,33 @@ export async function changeSimulationSpeed(speed: number): Promise<Snapshot> {
   return response.json()
 }
 
+export interface AnalyticsSummary {
+  total_snapshots: number
+  simulation_days_covered: number
+  date_range: string
+  overall_avg_revenue: number
+  overall_total_revenue: number
+  peak_revenue_day: number
+  peak_revenue_hour: number
+  weather_impact_summary: string
+  dow_impact_summary: string
+  key_insight: string
+  daily_trend: { day: number; avg_revenue: number; total_revenue: number; avg_traffic: number; weather: string; weather_mod: number; transit_mod: number }[]
+  weather_patterns: { condition: string; avg_revenue: number; avg_traffic: number; impact_pct: number; samples: number }[]
+  day_of_week: { day: string; index: number; avg_revenue: number; avg_traffic: number; impact_pct: number; samples: number }[]
+  hourly: { hour: number; avg_revenue: number; avg_traffic: number; samples: number }[]
+}
+
+export async function getAnalytics(): Promise<AnalyticsSummary> {
+  const response = await fetch(apiUrl('/api/analytics'))
+  if (!response.ok) throw await requestError(response, 'Unable to load analytics')
+  return response.json()
+}
+
+export async function resetAnalytics(): Promise<void> {
+  const response = await fetch(apiUrl('/api/analytics/reset'), { method: 'POST' })
+  if (!response.ok) throw await requestError(response, 'Unable to reset analytics')
+}
+
 // No WebSocket — Vercel serverless functions do not support long-lived connections.
 // Use polling via getSnapshot() instead.
