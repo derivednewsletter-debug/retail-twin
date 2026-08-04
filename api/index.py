@@ -323,13 +323,16 @@ class RetailTwinSimulation:
         cat_curve = CATEGORY_HOUR_CURVES.get(self.config.category, {})
         cat_mod = cat_curve.get(self.hour, 0.5)
         weather_mod = self.context.weather.traffic_modifier if self.context else 1.0
+        subway_mod = self.context.subway_traffic_modifier if self.context else 1.0
         real_world_mult = round(hourly_mod * day_mod * cat_mod * weather_mod, 3)
         location_metrics = []
         for location in DISTRICT_LOCATIONS:
             if location.id not in enabled:
                 continue
             marketing_lift = 1 + (len(self.config.marketing_channels) * 0.035)
-            base_traffic = location.traffic * real_world_mult
+            # Location B (Broadway Subway) gets additional subway traffic modifier
+            loc_mult = real_world_mult * subway_mod if location.id == "B" else real_world_mult
+            base_traffic = location.traffic * loc_mult
             transactions = round(base_traffic * location.conversion * marketing_lift * day_factor)
             daily_revenue = round(transactions * self.config.average_ticket)
             location_metrics.append({
@@ -356,8 +359,16 @@ class RetailTwinSimulation:
         awareness = min(92, 24 + elapsed_hours * 0.16 + len(self.config.marketing_channels) * 2)
         complete = self.day == 30 and self.hour == 23
         weather_info = {}
+        transit_info = {}
         if self.context:
             weather_info = {"temperature_f": self.context.weather.temperature_f, "condition": self.context.weather.condition, "wind_mph": self.context.weather.wind_mph, "traffic_modifier": self.context.weather.traffic_modifier}
+            transit_info = {
+                "status": self.context.transit.overall_status,
+                "traffic_modifier": self.context.transit.traffic_modifier,
+                "lines_affected": self.context.transit.lines_affected,
+                "alerts": [{"line": a.line, "status": a.status, "header": a.header, "severity": a.severity} for a in self.context.transit.alerts[:5]],
+                "last_updated": self.context.transit.last_updated,
+            }
         return {
             "running": self.running, "complete": complete, "day": self.day, "hour": self.hour,
             "progress": 100 if complete else round(min(100, elapsed_hours / 720 * 100), 1),
@@ -371,8 +382,8 @@ class RetailTwinSimulation:
             "locations": location_metrics, "feed": self.feed, "competitor_events": self.competitor_events,
             "agents": self.agents,
             "layer_values": {"footTraffic": min(100, round(total_traffic / 300)), "awareness": round(awareness), "sentiment": round(69 + best["repeat_rate"] * 30), "revenue": min(100, round(best["market_share"] * 2.8))},
-            "weather": weather_info, "real_world_modifier": real_world_mult,
-            "data_sources": {"weather": "Open-Meteo" if self.context else "fallback", "demographics": "US Census" if self.context else "fallback", "nyc_open_data": "NYC 311" if self.context and self.context.nyc_events else "fallback", "consumer_feed": "AI-generated" if self.ai_generator.available_providers() else "deterministic"},
+            "weather": weather_info, "transit": transit_info, "real_world_modifier": real_world_mult,
+            "data_sources": {"weather": "Open-Meteo" if self.context else "fallback", "demographics": "US Census" if self.context else "fallback", "nyc_open_data": "NYC 311" if self.context and self.context.nyc_events else "fallback", "transit": "MTA GTFS" if self.context and self.context.transit.alerts else "fallback", "consumer_feed": "AI-generated" if self.ai_generator.available_providers() else "deterministic"},
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -579,6 +590,18 @@ async def get_nyc_events():
     from data_services import get_nyc_events as fetch_events
     events = await fetch_events()
     return [{"type": e.type, "description": e.description, "neighborhood": e.neighborhood, "severity": e.severity} for e in events]
+
+@app.get("/api/data/transit")
+async def get_transit():
+    from data_services import get_transit_status as fetch_transit
+    t = await fetch_transit()
+    return {
+        "status": t.overall_status,
+        "traffic_modifier": t.traffic_modifier,
+        "lines_affected": t.lines_affected,
+        "alerts": [{"line": a.line, "status": a.status, "header": a.header, "description": a.description, "severity": a.severity} for a in t.alerts],
+        "last_updated": t.last_updated,
+    }
 
 
 # ---------------------------------------------------------------------------

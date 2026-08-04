@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -341,6 +342,201 @@ def get_category_modifier(category: str, hour: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# NYC Subway Transit Data (MTA GTFS — free public service alerts feed)
+# ---------------------------------------------------------------------------
+
+# Subway lines serving SoHo / Broadway-Lafayette area
+SOHO_SUBWAY_LINES = ["N", "Q", "R", "W", "B", "D", "F", "M", "6"]
+
+# Station IDs for SoHo area stations
+SOHO_STATIONS = {
+    "Prince St": ["R20", "R21"],  # N, R, W
+    "Broadway-Lafayette": ["A40", "D15"],  # B, D, F, M
+    "Spring St": ["A41", "C25"],  # C, E
+    "Canal St": ["R36", "A38"],  # N, Q, R, W, J, Z, 6
+}
+
+
+@dataclass(frozen=True)
+class TransitAlert:
+    line: str
+    status: str  # "good", "delays", "service_change", "planned"
+    header: str
+    description: str
+    affected_stations: list[str]
+    severity: int  # 0=good, 1=minor, 2=moderate, 3=severe
+
+
+@dataclass(frozen=True)
+class TransitStatus:
+    alerts: list[TransitAlert]
+    overall_status: str  # "good", "minor_delays", "major_delays"
+    traffic_modifier: float  # 0.6 to 1.1 multiplier for foot traffic at subway location
+    lines_affected: list[str]
+    last_updated: str
+
+
+async def get_transit_status() -> TransitStatus:
+    """Fetch MTA subway alerts for SoHo-area lines.
+    
+    Uses the free MTA GTFS service alerts feed (no API key required).
+    Caches results for 5 minutes to respect rate limits.
+    """
+    cache_key = "transit_status"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # MTA free service alerts endpoint (no API key required)
+    url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/cny%2Falerts"
+    
+    alerts: list[TransitAlert] = []
+    lines_with_delays: set[str] = set()
+    
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            
+            # Try to parse as GTFS Protocol Buffer (binary)
+            # If that fails, try JSON fallback
+            try:
+                from google.transit import gtfs_realtime_pb2
+                feed = gtfs_realtime_pb2.FeedMessage()
+                feed.ParseFromString(resp.content)
+                
+                for entity in feed.entity:
+                    if not entity.HasField('alert'):
+                        continue
+                    
+                    alert = entity.alert
+                    
+                    # Check if this alert affects any SoHo lines
+                    affected_lines = set()
+                    for informed_entity in alert.informed_entity:
+                        route_id = informed_entity.route_id
+                        if route_id in SOHO_SUBWAY_LINES:
+                            affected_lines.add(route_id)
+                    
+                    if not affected_lines:
+                        continue
+                    
+                    # Extract alert text
+                    header = ""
+                    if alert.header_text.translation:
+                        header = alert.header_text.translation[0].text
+                    
+                    description = ""
+                    if alert.description_text.translation:
+                        description = alert.description_text.translation[0].text
+                    
+                    # Determine status from alert type
+                    status = "service_change"
+                    severity = 1
+                    
+                    alert_type = alert.effect
+                    if alert_type == 1:  # NO_SERVICE
+                        status = "delays"
+                        severity = 3
+                    elif alert_type == 2:  # REDUCED_SERVICE
+                        status = "delays"
+                        severity = 2
+                    elif alert_type == 3:  # SIGNIFICANT_DELAYS
+                        status = "delays"
+                        severity = 2
+                    elif alert_type == 4:  # DETOUR
+                        status = "service_change"
+                        severity = 1
+                    elif alert_type == 5:  # ADDITIONAL_SERVICE
+                        status = "good"
+                        severity = 0
+                    elif alert_type == 6:  # MODIFIED_SERVICE
+                        status = "service_change"
+                        severity = 1
+                    elif alert_type == 7:  # OTHER_EFFECT
+                        status = "planned"
+                        severity = 0
+                    elif alert_type == 8:  # UNKNOWN_EFFECT
+                        status = "service_change"
+                        severity = 1
+                    
+                    for line in affected_lines:
+                        alerts.append(TransitAlert(
+                            line=line,
+                            status=status,
+                            header=header[:100] if header else f"Service change on {line} train",
+                            description=description[:200] if description else "",
+                            affected_stations=["Prince St", "Broadway-Lafayette"],
+                            severity=severity,
+                        ))
+                        if severity >= 2:
+                            lines_with_delays.add(line)
+            except ImportError:
+                # gtfs_realtime_pb2 not available, try JSON parsing
+                # MTA also provides JSON alerts at a different endpoint
+                json_url = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/cny%2Falerts.json"
+                try:
+                    json_resp = await client.get(json_url)
+                    json_resp.raise_for_status()
+                    data = json_resp.json()
+                    # Parse JSON alerts if available
+                    for entity in data.get('entities', []):
+                        alert = entity.get('alert', {})
+                        affected_lines = set()
+                        for informed in alert.get('informed_entity', []):
+                            route = informed.get('route_id', '')
+                            if route in SOHO_SUBWAY_LINES:
+                                affected_lines.add(route)
+                        if affected_lines:
+                            header = alert.get('header_text', {}).get('translation', [{}])[0].get('text', '')
+                            description = alert.get('description_text', {}).get('translation', [{}])[0].get('text', '')
+                            for line in affected_lines:
+                                alerts.append(TransitAlert(
+                                    line=line,
+                                    status="service_change",
+                                    header=header[:100] if header else f"Service change on {line} train",
+                                    description=description[:200],
+                                    affected_stations=["Prince St", "Broadway-Lafayette"],
+                                    severity=1,
+                                ))
+                except Exception:
+                    pass
+            except Exception:
+                # If protobuf parsing fails, continue with empty alerts
+                pass
+    except Exception:
+        # MTA feed unavailable — use fallback
+        pass
+    
+    # Determine overall status
+    max_severity = max((a.severity for a in alerts), default=0)
+    if max_severity >= 3:
+        overall = "major_delays"
+        traffic_mod = 0.55
+    elif max_severity >= 2:
+        overall = "minor_delays"
+        traffic_mod = 0.75
+    elif max_severity >= 1:
+        overall = "minor_delays"
+        traffic_mod = 0.90
+    else:
+        overall = "good"
+        traffic_mod = 1.0
+    
+    from datetime import datetime, timezone
+    result = TransitStatus(
+        alerts=alerts[:10],  # Limit to 10 most relevant
+        overall_status=overall,
+        traffic_modifier=traffic_mod,
+        lines_affected=sorted(lines_with_delays),
+        last_updated=datetime.now(timezone.utc).isoformat(),
+    )
+    
+    _cache.set(cache_key, result, ttl_seconds=300)  # Cache for 5 minutes
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Aggregated simulation context
 # ---------------------------------------------------------------------------
 
@@ -349,32 +545,44 @@ class SimulationContext:
     weather: WeatherData
     demographics: DemographicData
     nyc_events: list[NYCEvent]
+    transit: TransitStatus
     hourly_modifier: float
     day_modifier: float
     category_modifier: float
     overall_traffic_multiplier: float
+    subway_traffic_modifier: float  # Additional modifier for subway-adjacent location
 
 
 async def build_simulation_context(
     category: str, hour: int, day: int,
 ) -> SimulationContext:
     """Build a rich context object from all real-world data sources."""
-    weather, demographics, events = await asyncio.gather(
+    weather, demographics, events, transit = await asyncio.gather(
         get_weather(),
         get_demographics(),
         get_nyc_events(),
+        get_transit_status(),
     )
     hourly = get_hourly_modifier(hour)
     day_mod = get_day_modifier(day)
     cat_mod = get_category_modifier(category, hour)
     overall = round(hourly * day_mod * cat_mod * weather.traffic_modifier, 3)
+    
+    # Subway traffic modifier: transit delays reduce foot traffic at Location B
+    # Location B (Broadway Subway) gets 40% of its traffic from subway riders
+    subway_mod = transit.traffic_modifier
+    subway_contribution = 0.40  # 40% of Location B traffic comes from subway
+    non_subway_contribution = 1.0 - subway_contribution
+    location_b_modifier = round(non_subway_contribution + (subway_contribution * subway_mod), 3)
 
     return SimulationContext(
         weather=weather,
         demographics=demographics,
         nyc_events=events,
+        transit=transit,
         hourly_modifier=hourly,
         day_modifier=day_mod,
         category_modifier=cat_mod,
         overall_traffic_multiplier=overall,
+        subway_traffic_modifier=location_b_modifier,
     )

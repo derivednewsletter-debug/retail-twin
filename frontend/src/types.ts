@@ -67,6 +67,21 @@ export interface WeatherInfo {
   traffic_modifier: number
 }
 
+export interface TransitAlert {
+  line: string
+  status: string
+  header: string
+  severity: number
+}
+
+export interface TransitInfo {
+  status: string
+  traffic_modifier: number
+  lines_affected: string[]
+  alerts: TransitAlert[]
+  last_updated: string
+}
+
 export interface DataSources {
   weather: string
   demographics: string
@@ -96,6 +111,7 @@ export interface Snapshot {
   agents: Agent[]
   layer_values: Record<LayerKey, number>
   weather?: WeatherInfo
+  transit?: TransitInfo
   real_world_modifier?: number
   data_sources?: DataSources
 }
