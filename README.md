@@ -74,6 +74,22 @@ FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
 
 The backend CORS configuration keeps localhost enabled for development and adds `FRONTEND_ORIGIN` in production. Keep AI keys only in Render’s secret manager.
 
+### Render troubleshooting
+
+If the Render log shows a command containing both `rootDir: backend` and `--app-dir backend`, remove `--app-dir backend`. With Render’s Root Directory set to `backend`, use exactly:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+Do not use `uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir backend` when the Root Directory is already `backend`; that points Uvicorn at a nonexistent nested path. If you leave Root Directory blank instead, the alternative command is:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir backend
+```
+
+Use one configuration, not both. After the backend is healthy, open `https://your-render-service.onrender.com/api/health`; it must return JSON before the frontend’s Press Play action can work.
+
 ## Security note
 
 The credentials pasted into chat should be considered exposed. Rotate/revoke all five keys in their provider consoles before using them in production. This repository intentionally contains placeholders only.
