@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random as _random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator
-from pydantic import Literal
+
+from data_services import (
+    WeatherData, DemographicData, NYCEvent,
+    build_simulation_context, SimulationContext,
+    HOURLY_PATTERN, CATEGORY_HOUR_CURVES,
+)
+from ai_content import AIContentGenerator
 
 load_dotenv()
 
@@ -20,20 +29,13 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 Category = Literal[
-    "Premium coffee",
-    "Healthy fast casual",
-    "Athletic apparel",
-    "Fitness studio",
-    "Beauty retail",
-    "Specialty grocery",
+    "Premium coffee", "Healthy fast casual", "Athletic apparel",
+    "Fitness studio", "Beauty retail", "Specialty grocery",
 ]
 
 MarketingChannel = Literal[
-    "Grand opening",
-    "Transit ads",
-    "Local influencers",
-    "Opening discount",
-    "Social media",
+    "Grand opening", "Transit ads", "Local influencers",
+    "Opening discount", "Social media",
 ]
 
 
@@ -52,7 +54,10 @@ class ScenarioConfig(BaseModel):
     marketing_budget: int = Field(default=85000, ge=0, le=5_000_000)
     positioning: str = Field(default="Thoughtful energy for the city", min_length=3, max_length=160)
     target_demographic: str = Field(default="Office workers + design-forward locals", min_length=3, max_length=120)
-    locations: list[LocationConfig] = Field(default_factory=lambda: [LocationConfig(id="A"), LocationConfig(id="B"), LocationConfig(id="C")], min_length=1)
+    locations: list[LocationConfig] = Field(
+        default_factory=lambda: [LocationConfig(id="A"), LocationConfig(id="B"), LocationConfig(id="C")],
+        min_length=1,
+    )
     marketing_channels: list[MarketingChannel] = Field(default_factory=lambda: ["Grand opening", "Transit ads"])
 
     @field_validator("closing_time")
@@ -66,7 +71,7 @@ class ScenarioConfig(BaseModel):
     @field_validator("locations")
     @classmethod
     def at_least_one_location(cls, value: list[LocationConfig]):
-        if not any(location.enabled for location in value):
+        if not any(loc.enabled for loc in value):
             raise ValueError("At least one location must be enabled")
         return value
 
@@ -90,7 +95,7 @@ class AIResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Simulation engine
+# District data
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -111,35 +116,58 @@ DISTRICT_LOCATIONS = [
     DistrictLocation("C", "Prince Courtyard", 57, 82, 7900, 11800, 0.047, "weekend tourism + residential pocket"),
 ]
 
-FEED_TEMPLATES = [
+# Deterministic fallback feed (used when AI generation fails)
+FALLBACK_FEED = [
     ("Maya R.", "Walked past the new {brand} on my way to the studio — the line is already moving fast.", "positive"),
     ("Jordan L.", "The subway exit is the perfect spot for a quick {category} stop.", "positive"),
     ("Priya S.", "A little pricier than Blank Street, but the experience feels much more intentional.", "neutral"),
     ("Eli T.", "Honestly did not expect to become a regular this quickly. The staff remembers my order.", "positive"),
     ("Noah K.", "Lunch rush is intense today. Wonder if they will add more seating.", "neutral"),
+    ("Sofia M.", "The matcha latte here is leagues better than the chain down the block.", "positive"),
+    ("Marcus D.", "Stopped in after a gallery visit — the space feels curated but welcoming.", "positive"),
+    ("Aisha T.", "Price point is steep for a daily habit, but perfect for a weekend treat.", "neutral"),
+    ("Chris P.", "Found it on a side street. Feels like a local secret already.", "positive"),
+    ("Diana W.", "Brought my team here for a working lunch. Everyone loved it.", "positive"),
+    ("Ryan K.", "The line was out the door at noon. Had to come back at 3pm.", "neutral"),
+    ("Zara L.", "First time trying their cold brew. Worth the walk from Spring St.", "positive"),
+    ("Kevin H.", "Not bad, but Blue Bottle is right there and I have a routine.", "negative"),
+    ("Olivia R.", "The pastry case sold out by 10am. Need to come earlier.", "neutral"),
+    ("James F.", "Great WiFi, good vibes. New go-to spot for remote work.", "positive"),
 ]
 
-COMPETITOR_EVENTS = [
+FALLBACK_COMPETITORS = [
     ("Blank Street", "launched a 15% commuter offer within a 3-block radius", "discount"),
     ("Blue Bottle", "extended morning hours to capture the subway surge", "hours"),
     ("Daily Provisions", "increased local digital spend after noticing your repeat rate", "ads"),
     ("Joe & The Juice", "added a fast-pickup shelf for office workers", "operations"),
+    ("Starbucks", "deployed a mobile order pickup station at the corner", "operations"),
+    ("La Colombe", "launched a BOGO latte promo targeting SoHo commuters", "discount"),
+    ("Sweetgreen", "increased delivery radius to cover your trade area", "operations"),
+    ("Tory Burch", "hosted a weekend pop-up drawing foot traffic to the block", "ads"),
 ]
 
 
+# ---------------------------------------------------------------------------
+# Simulation engine (enhanced with real-world data + AI content)
+# ---------------------------------------------------------------------------
+
 class RetailTwinSimulation:
-    def __init__(self):
+    def __init__(self) -> None:
         self.config = ScenarioConfig()
         self.running = False
         self.speed = 10
         self.day = 1
         self.hour = 7
         self.tick_count = 0
-        import random as _random
-        self.random = _random.Random(42042)
+        self.rng = _random.Random(42042)
         self.feed: list[dict[str, Any]] = []
         self.competitor_events: list[dict[str, Any]] = []
         self.agents = self._create_agents()
+        self.context: Optional[SimulationContext] = None
+        self.ai_generator = AIContentGenerator()
+        self._last_ai_tick = 0
+        self.weather_summary = "clear"
+        self.demographic_summary = "dense urban, high walkability"
 
     def configure(self, config: ScenarioConfig) -> None:
         self.config = config
@@ -150,10 +178,14 @@ class RetailTwinSimulation:
         self.day = 1
         self.hour = self.config.opening_time
         self.tick_count = 0
-        self.random.seed(42042)
+        self.rng.seed(42042)
         self.feed = []
         self.competitor_events = []
         self.agents = self._create_agents()
+        self.context = None
+        self.weather_summary = "clear"
+        self.demographic_summary = "dense urban, high walkability"
+        self._last_ai_tick = 0
 
     def start(self, speed: int = 10) -> None:
         self.speed = speed
@@ -166,18 +198,16 @@ class RetailTwinSimulation:
         self.speed = speed
 
     def step(self, ticks: int = 1) -> dict[str, Any]:
-        import random as _random
         for _ in range(max(1, ticks)):
             self._advance()
         return self.snapshot()
 
     def _create_agents(self) -> list[dict[str, Any]]:
-        import random as _random
         archetypes = [("office", 0.40), ("local", 0.28), ("tourist", 0.17), ("resident", 0.15)]
         agents = []
         for index in range(84):
-            roll = self.random.random()
-            cumulative = 0
+            roll = self.rng.random()
+            cumulative = 0.0
             archetype = "local"
             for name, weight in archetypes:
                 cumulative += weight
@@ -187,16 +217,83 @@ class RetailTwinSimulation:
             agents.append({
                 "id": index,
                 "type": archetype,
-                "x": self.random.uniform(6, 94),
-                "y": self.random.uniform(7, 93),
-                "target_x": self.random.uniform(8, 92),
-                "target_y": self.random.uniform(8, 92),
+                "x": self.rng.uniform(6, 94),
+                "y": self.rng.uniform(7, 93),
+                "target_x": self.rng.uniform(8, 92),
+                "target_y": self.rng.uniform(8, 92),
                 "status": "walking",
-                "color": {"office": "#a78bfa", "local": "#fbbf24", "tourist": "#fb7185", "resident": "#38bdf8"}[archetype],
+                "color": {
+                    "office": "#a78bfa", "local": "#fbbf24",
+                    "tourist": "#fb7185", "resident": "#38bdf8",
+                }[archetype],
             })
         return agents
 
-    def _advance(self) -> None:
+    async def _advance_async(self) -> None:
+        """Async advance that fetches real data and generates AI content."""
+        if self.day == 30 and self.hour == 23:
+            self.running = False
+            return
+
+        self.tick_count += 1
+        self.hour += 1
+        if self.hour >= 24:
+            self.hour = 0
+            self.day += 1
+        if self.day >= 30 and self.hour >= 23:
+            self.day = 30
+            self.hour = 23
+            self.running = False
+            return
+
+        # Update real-world context every 6 ticks (simulated hour)
+        if self.tick_count % 6 == 0 or self.context is None:
+            try:
+                self.context = await build_simulation_context(
+                    self.config.category, self.hour, self.day,
+                )
+                self.weather_summary = self.context.weather.condition
+                self.demographic_summary = (
+                    f"{self.context.demographics.density_label}, "
+                    f"{self.context.demographics.walk_pct}% walk to work"
+                )
+            except Exception:
+                self.context = None
+
+        # Move agents
+        self._move_agents()
+
+        # Generate consumer feed (AI or fallback)
+        traffic_mult = self.context.overall_traffic_multiplier if self.context else 1.0
+        feed_probability = 0.12 * traffic_mult
+        if self.tick_count % 2 == 0 and self.rng.random() < feed_probability + 0.15:
+            post = await self._generate_feed_post()
+            if post:
+                self.feed.insert(0, {
+                    "id": self.tick_count,
+                    "name": post.get("name", "Anonymous"),
+                    "text": post.get("text", "Visited the new store."),
+                    "sentiment": post.get("sentiment", "neutral"),
+                    "time": f"{max(1, self.tick_count % 58)} min ago",
+                    "avatar": post.get("name", "A")[0] if post.get("name") else "A",
+                })
+                self.feed = self.feed[:8]
+
+        # Generate competitor events (AI or fallback)
+        if self.tick_count % 8 == 0:
+            event = await self._generate_competitor_event()
+            if event:
+                self.competitor_events.insert(0, {
+                    "id": self.tick_count,
+                    "competitor": event.get("competitor", "Blank Street"),
+                    "text": event.get("text", "adjusted local pricing"),
+                    "kind": event.get("kind", "discount"),
+                    "time": f"Day {self.day} · {self.hour:02d}:00",
+                })
+                self.competitor_events = self.competitor_events[:6]
+
+    def _advance_sync(self) -> None:
+        """Synchronous advance fallback."""
         if self.day == 30 and self.hour == 23:
             self.running = False
             return
@@ -209,7 +306,34 @@ class RetailTwinSimulation:
             self.day = 30
             self.hour = 23
             self.running = False
+            return
+        self._move_agents()
+        if self.tick_count % 2 == 0:
+            template = self.rng.choice(FALLBACK_FEED)
+            self.feed.insert(0, {
+                "id": self.tick_count,
+                "name": template[0],
+                "text": template[1].format(
+                    brand=self.config.brand_name,
+                    category=self.config.category.lower(),
+                ),
+                "sentiment": template[2],
+                "time": f"{max(1, self.tick_count % 58)} min ago",
+                "avatar": template[0][0],
+            })
+            self.feed = self.feed[:8]
+        if self.tick_count % 5 == 0:
+            event = self.rng.choice(FALLBACK_COMPETITORS)
+            self.competitor_events.insert(0, {
+                "id": self.tick_count,
+                "competitor": event[0],
+                "text": event[1],
+                "kind": event[2],
+                "time": f"Day {self.day} · {self.hour:02d}:00",
+            })
+            self.competitor_events = self.competitor_events[:6]
 
+    def _move_agents(self) -> None:
         for agent in self.agents:
             dx = agent["target_x"] - agent["x"]
             dy = agent["target_y"] - agent["y"]
@@ -217,45 +341,79 @@ class RetailTwinSimulation:
             stride = 1.2 if agent["type"] == "office" else 0.78
             agent["x"] += dx / distance * min(stride, distance)
             agent["y"] += dy / distance * min(stride, distance)
-            if distance < 1.5 or self.random.random() < 0.035:
-                agent["target_x"] = self.random.uniform(6, 94)
-                agent["target_y"] = self.random.uniform(7, 93)
-            if self.random.random() < 0.025:
-                agent["status"] = self.random.choice(["walking", "browsing", "queued", "checking-in"])
+            if distance < 1.5 or self.rng.random() < 0.035:
+                agent["target_x"] = self.rng.uniform(6, 94)
+                agent["target_y"] = self.rng.uniform(7, 93)
+            if self.rng.random() < 0.025:
+                agent["status"] = self.rng.choice(
+                    ["walking", "browsing", "queued", "checking-in"]
+                )
 
-        if self.tick_count % 2 == 0:
-            template = self.random.choice(FEED_TEMPLATES)
-            self.feed.insert(0, {
-                "id": self.tick_count,
-                "name": template[0],
-                "text": template[1].format(brand=self.config.brand_name, category=self.config.category.lower()),
-                "sentiment": template[2],
-                "time": f"{max(1, self.tick_count % 58)} min ago",
-                "avatar": template[0][0],
-            })
-            self.feed = self.feed[:5]
-        if self.tick_count % 5 == 0:
-            event = self.random.choice(COMPETITOR_EVENTS)
-            self.competitor_events.insert(0, {
-                "id": self.tick_count,
-                "competitor": event[0],
-                "text": event[1],
-                "kind": event[2],
-                "time": f"Day {self.day} \u00b7 {self.hour:02d}:00",
-            })
-            self.competitor_events = self.competitor_events[:4]
+    async def _generate_feed_post(self) -> Optional[dict[str, Any]]:
+        """Try AI generation, fall back to deterministic templates."""
+        try:
+            posts = await self.ai_generator.generate_consumer_posts(
+                brand=self.config.brand_name,
+                category=self.config.category,
+                weather_condition=self.weather_summary,
+                hour=self.hour,
+                location_name=self.rng.choice(
+                    [loc.name for loc in DISTRICT_LOCATIONS]
+                ),
+            )
+            if posts:
+                return self.rng.choice(posts)
+        except Exception:
+            pass
+        # Fallback
+        template = self.rng.choice(FALLBACK_FEED)
+        return {
+            "name": template[0],
+            "text": template[1].format(
+                brand=self.config.brand_name,
+                category=self.config.category.lower(),
+            ),
+            "sentiment": template[2],
+        }
+
+    async def _generate_competitor_event(self) -> Optional[dict[str, Any]]:
+        """Try AI generation, fall back to deterministic templates."""
+        try:
+            event = await self.ai_generator.generate_competitor_event(
+                brand=self.config.brand_name,
+                competitors=["Blank Street", "Blue Bottle", "Daily Provisions",
+                             "Joe & The Juice", "Starbucks", "La Colombe"],
+                hour=self.hour,
+                weather_condition=self.weather_summary,
+            )
+            if event:
+                return event
+        except Exception:
+            pass
+        # Fallback
+        event = self.rng.choice(FALLBACK_COMPETITORS)
+        return {"competitor": event[0], "text": event[1], "kind": event[2]}
 
     def snapshot(self) -> dict[str, Any]:
-        from datetime import datetime, timezone
         elapsed_hours = (self.day - 1) * 24 + self.hour
         day_factor = min(1.0, max(0.55, elapsed_hours / 240))
-        enabled = {location.id for location in self.config.locations if location.enabled}
+        enabled = {loc.id for loc in self.config.locations if loc.enabled}
+
+        # Real-world modifiers
+        hourly_mod = HOURLY_PATTERN.get(self.hour, 1.0)
+        day_mod = [0.90, 0.95, 1.0, 1.05, 1.15, 1.20, 1.10][(self.day - 1) % 7]
+        cat_curve = CATEGORY_HOUR_CURVES.get(self.config.category, {})
+        cat_mod = cat_curve.get(self.hour, 0.5)
+        weather_mod = self.context.weather.traffic_modifier if self.context else 1.0
+        real_world_mult = round(hourly_mod * day_mod * cat_mod * weather_mod, 3)
+
         location_metrics = []
         for location in DISTRICT_LOCATIONS:
             if location.id not in enabled:
                 continue
             marketing_lift = 1 + (len(self.config.marketing_channels) * 0.035)
-            transactions = round(location.traffic * location.conversion * marketing_lift * day_factor)
+            base_traffic = location.traffic * real_world_mult
+            transactions = round(base_traffic * location.conversion * marketing_lift * day_factor)
             daily_revenue = round(transactions * self.config.average_ticket)
             location_metrics.append({
                 "id": location.id,
@@ -265,7 +423,7 @@ class RetailTwinSimulation:
                 "transactions": transactions,
                 "repeat_rate": round(min(0.64, 0.22 + location.conversion * 3.8 + day_factor * 0.08), 2),
                 "conversion_rate": round(location.conversion * marketing_lift * 100, 1),
-                "foot_traffic": round(location.traffic * (0.98 + day_factor * 0.04)),
+                "foot_traffic": round(base_traffic),
                 "market_share": round(min(32.0, location.conversion * 240 * marketing_lift), 1),
                 "rent": location.rent,
                 "payback_months": round(max(12, 25 - location.conversion * 130)),
@@ -273,17 +431,34 @@ class RetailTwinSimulation:
             })
 
         if not location_metrics:
-            location_metrics = [{"id": "?", "name": "No location", "daily_revenue": 0, "annual_revenue": 0, "transactions": 0, "repeat_rate": 0, "conversion_rate": 0, "foot_traffic": 0, "market_share": 0, "rent": 0, "payback_months": 0, "insight": ""}]
+            location_metrics = [{
+                "id": "?", "name": "No location", "daily_revenue": 0,
+                "annual_revenue": 0, "transactions": 0, "repeat_rate": 0,
+                "conversion_rate": 0, "foot_traffic": 0, "market_share": 0,
+                "rent": 0, "payback_months": 0, "insight": "",
+            }]
 
-        best = max(location_metrics, key=lambda item: item["daily_revenue"])
-        total_traffic = round(sum(item["foot_traffic"] for item in location_metrics) / max(1, len(location_metrics)))
+        best = max(location_metrics, key=lambda x: x["daily_revenue"])
+        total_traffic = round(sum(x["foot_traffic"] for x in location_metrics) / max(1, len(location_metrics)))
         total_transactions = best["transactions"]
         is_open = self.config.opening_time <= self.hour < self.config.closing_time
         if not is_open:
             total_transactions = round(total_transactions * 0.18)
             best = {**best, "transactions": total_transactions, "daily_revenue": round(total_transactions * self.config.average_ticket)}
+
         awareness = min(92, 24 + elapsed_hours * 0.16 + len(self.config.marketing_channels) * 2)
         complete = self.day == 30 and self.hour == 23
+
+        # Weather and context info for frontend
+        weather_info = {}
+        if self.context:
+            weather_info = {
+                "temperature_f": self.context.weather.temperature_f,
+                "condition": self.context.weather.condition,
+                "wind_mph": self.context.weather.wind_mph,
+                "traffic_modifier": self.context.weather.traffic_modifier,
+            }
+
         return {
             "running": self.running,
             "complete": complete,
@@ -310,12 +485,20 @@ class RetailTwinSimulation:
                 "sentiment": round(69 + best["repeat_rate"] * 30),
                 "revenue": min(100, round(best["market_share"] * 2.8)),
             },
+            "weather": weather_info,
+            "real_world_modifier": real_world_mult,
+            "data_sources": {
+                "weather": "Open-Meteo" if self.context else "fallback",
+                "demographics": "US Census" if self.context else "fallback",
+                "nyc_open_data": "NYC 311" if self.context and self.context.nyc_events else "fallback",
+                "consumer_feed": "AI-generated" if self.ai_generator.available_providers() else "deterministic",
+            },
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
 
 # ---------------------------------------------------------------------------
-# AI service
+# AI service (for executive briefs and on-demand generation)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -348,9 +531,8 @@ class AIResult:
 
 
 class AIService:
-    def __init__(self, timeout_seconds: float = 12.0, transport: Optional[httpx.AsyncBaseTransport] = None):
+    def __init__(self, timeout_seconds: float = 12.0) -> None:
         self.timeout = httpx.Timeout(timeout_seconds, connect=5.0)
-        self.transport = transport
 
     def _api_key(self, config: ProviderConfig) -> Optional[str]:
         for env_var in config.env_vars:
@@ -360,8 +542,22 @@ class AIService:
         return None
 
     def status(self) -> dict[str, Any]:
-        providers = [{"name": name, "configured": bool(self._api_key(config)), "model": config.default_model} for name, config in PROVIDERS.items()]
-        return {"providers": providers, "fallback": "deterministic simulation copy", "mode": "ai-enabled" if any(item["configured"] for item in providers) else "deterministic"}
+        providers = [
+            {"name": name, "configured": bool(self._api_key(config)), "model": config.default_model}
+            for name, config in PROVIDERS.items()
+        ]
+        # Also check data service APIs (they're free, no key needed)
+        data_sources = [
+            {"name": "Open-Meteo Weather", "configured": True, "type": "data"},
+            {"name": "US Census Demographics", "configured": True, "type": "data"},
+            {"name": "NYC Open Data", "configured": True, "type": "data"},
+        ]
+        return {
+            "providers": providers,
+            "data_sources": data_sources,
+            "fallback": "deterministic simulation copy",
+            "mode": "ai-enabled" if any(p["configured"] for p in providers) else "deterministic",
+        }
 
     async def generate(self, prompt: str, provider: str = "auto", model: Optional[str] = None) -> AIResult:
         candidates = list(PROVIDER_ORDER) if provider == "auto" else [provider]
@@ -391,25 +587,40 @@ class AIService:
         else:
             headers["x-goog-api-key"] = api_key
 
-        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             if config.kind == "openai":
                 request_headers = headers.copy()
                 if config.name == "openrouter":
                     request_headers.update({"HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "https://retail-twin.vercel.app"), "X-Title": "Retail Twin"})
-                response = await client.post(config.url, headers=request_headers, json={"model": model, "messages": [{"role": "system", "content": "You are a concise retail location strategy analyst. Return practical executive insight."}, {"role": "user", "content": prompt}], "temperature": 0.35, "max_tokens": 700})
+                response = await client.post(config.url, headers=request_headers, json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are a concise retail location strategy analyst. Return practical executive insight."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.35, "max_tokens": 700,
+                })
                 response.raise_for_status()
                 return response.json()["choices"][0]["message"]["content"]
 
             if config.kind == "gemini":
-                response = await client.post(config.url.format(model=model), headers=headers, json={"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.35, "maxOutputTokens": 700}})
+                response = await client.post(config.url.format(model=model), headers=headers, json={
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.35, "maxOutputTokens": 700},
+                })
                 response.raise_for_status()
                 return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-            response = await client.post(config.url, headers=headers, json={"model": model, "messages": [{"role": "system", "content": "You are a concise retail location strategy analyst. Return practical executive insight."}, {"role": "user", "content": prompt}], "temperature": 0.35, "max_tokens": 700})
+            # Cohere
+            response = await client.post(config.url, headers=headers, json={
+                "model": model,
+                "message": prompt,
+                "temperature": 0.35, "max_tokens": 700,
+            })
             response.raise_for_status()
-            content = response.json()["message"]["content"]
+            content = response.json().get("message", {}).get("content", "")
             if isinstance(content, list):
-                return "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+                return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
             return str(content)
 
     def _fallback(self, prompt: str) -> str:
@@ -419,7 +630,7 @@ class AIService:
 
 
 # ---------------------------------------------------------------------------
-# App singleton (persists across warm serverless invocations)
+# Singletons (persist across warm serverless invocations)
 # ---------------------------------------------------------------------------
 
 simulation = RetailTwinSimulation()
@@ -436,12 +647,16 @@ async def lifespan(_: FastAPI):
     simulation.stop()
 
 
-app = FastAPI(title="Retail Twin API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Retail Twin API", version="0.3.0", lifespan=lifespan)
 
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip()
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 if frontend_origin:
     allowed_origins.append(frontend_origin.rstrip("/"))
+# Also allow all Vercel preview deployments
+if not frontend_origin:
+    allowed_origins.append("*")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -453,7 +668,13 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "retail-twin", "simulation": simulation.running}
+    return {
+        "status": "ok",
+        "service": "retail-twin",
+        "version": "0.3.0",
+        "simulation": simulation.running,
+        "providers": ai_service.status()["providers"],
+    }
 
 
 @app.get("/api/ai/status")
@@ -481,7 +702,7 @@ async def configure_scenario(config: ScenarioConfig):
 @app.get("/api/snapshot")
 async def get_snapshot():
     if simulation.running:
-        simulation.step(1)
+        await simulation._advance_async()
     return simulation.snapshot()
 
 
@@ -507,3 +728,40 @@ async def reset_simulation():
 async def change_speed(command: SimulationCommand):
     simulation.set_speed(command.speed)
     return simulation.snapshot()
+
+
+@app.get("/api/data/weather")
+async def get_weather():
+    """Expose current weather data for the frontend."""
+    from data_services import get_weather as fetch_weather
+    w = await fetch_weather()
+    return {
+        "temperature_f": w.temperature_f,
+        "condition": w.condition,
+        "wind_mph": w.wind_mph,
+        "precipitation_mm": w.precipitation_mm,
+        "traffic_modifier": w.traffic_modifier,
+    }
+
+
+@app.get("/api/data/demographics")
+async def get_demographics():
+    """Expose demographic data for the frontend."""
+    from data_services import get_demographics as fetch_demo
+    d = await fetch_demo()
+    return {
+        "population": d.population,
+        "median_income": d.median_income,
+        "median_age": d.median_age,
+        "college_pct": d.college_pct,
+        "walk_pct": d.walk_pct,
+        "density_label": d.density_label,
+    }
+
+
+@app.get("/api/data/nyc-events")
+async def get_nyc_events():
+    """Expose NYC 311 events for the frontend."""
+    from data_services import get_nyc_events as fetch_events
+    events = await fetch_events()
+    return [{"type": e.type, "description": e.description, "neighborhood": e.neighborhood, "severity": e.severity} for e in events]

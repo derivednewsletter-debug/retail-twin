@@ -60,6 +60,20 @@ export interface CompetitorEvent {
   time: string
 }
 
+export interface WeatherInfo {
+  temperature_f: number
+  condition: string
+  wind_mph: number
+  traffic_modifier: number
+}
+
+export interface DataSources {
+  weather: string
+  demographics: string
+  nyc_open_data: string
+  consumer_feed: string
+}
+
 export interface Snapshot {
   running: boolean
   complete?: boolean
@@ -81,4 +95,7 @@ export interface Snapshot {
   competitor_events: CompetitorEvent[]
   agents: Agent[]
   layer_values: Record<LayerKey, number>
+  weather?: WeatherInfo
+  real_world_modifier?: number
+  data_sources?: DataSources
 }
