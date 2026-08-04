@@ -5,7 +5,7 @@ A full-stack location intelligence prototype for retail expansion decisions. Con
 ## Stack
 
 - **Frontend:** React, TypeScript, Vite, Lucide icons, CSS design system
-- **Backend:** Python 3.9+, FastAPI, Pydantic, WebSockets
+- **Backend:** Python 3.13+, FastAPI, Pydantic, WebSockets
 - **Simulation:** seeded deterministic consumer cohort engine; 10,000 synthetic consumers represented by a performant visual sample
 
 ## Run locally
@@ -60,7 +60,19 @@ The frontend shows whether the simulation is deterministic or AI-enabled through
 
 The React frontend is Vercel-ready: build with `npm run build` from `frontend`, and the included `vite.config.ts` handles local API proxying. The FastAPI service should be deployed separately to a WebSocket-capable host such as Railway, Render, Fly.io, or Cloud Run. Standard Vercel Serverless Functions are not a suitable host for the current long-lived simulation WebSocket.
 
-For production frontend hosting, set the API origin and replace the local proxy/WebSocket URL construction in `frontend/src/api.ts` with your deployed backend URL. Keep AI keys only in the backend host’s secret manager.
+For production frontend hosting, set this Vercel variable:
+
+```env
+VITE_API_BASE_URL=https://your-render-service.onrender.com
+```
+
+Set this Render variable to the exact Vercel origin (for example `https://retail-twin.vercel.app`):
+
+```env
+FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
+```
+
+The backend CORS configuration keeps localhost enabled for development and adds `FRONTEND_ORIGIN` in production. Keep AI keys only in Render’s secret manager.
 
 ## Security note
 
