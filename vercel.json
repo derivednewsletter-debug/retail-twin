@@ -4,10 +4,10 @@
   "outputDirectory": "dist",
   "installCommand": "npm install",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/main.py" }
+    { "source": "/api/(.*)", "destination": "/api/index" }
   ],
   "functions": {
-    "api/main.py": {
+    "api/index.py": {
       "maxDuration": 30
     }
   }
