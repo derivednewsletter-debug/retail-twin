@@ -80,10 +80,5 @@ export async function changeSimulationSpeed(speed: number): Promise<Snapshot> {
   return response.json()
 }
 
-export function openSimulationSocket(onSnapshot: (snapshot: Snapshot) => void, onError: () => void): WebSocket {
-  const socketBase = API_BASE ? API_BASE.replace(/^http/, 'ws') : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
-  const socket = new WebSocket(`${socketBase}/ws/simulation`)
-  socket.onmessage = (event) => onSnapshot(JSON.parse(event.data) as Snapshot)
-  socket.onerror = onError
-  return socket
-}
+// No WebSocket — Vercel serverless functions do not support long-lived connections.
+// Use polling via getSnapshot() instead.

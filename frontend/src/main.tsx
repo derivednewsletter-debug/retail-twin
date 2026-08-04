@@ -6,7 +6,7 @@ import {
   Clock3, Coffee, Gauge, Layers3, MapPin, Pause, Play, Radio, RotateCcw, Search,
   Sparkles, Store, Target, TrendingUp, Users, Zap,
 } from 'lucide-react'
-import { changeSimulationSpeed, configureScenario, generateAIInsight, getAIStatus, openSimulationSocket, simulationCommand } from './api'
+import { changeSimulationSpeed, configureScenario, generateAIInsight, getAIStatus, getSnapshot, simulationCommand } from './api'
 import type { AIStatus } from './api'
 import type { LayerKey, ScenarioConfig, Snapshot } from './types'
 import './styles.css'
@@ -46,7 +46,7 @@ function App() {
   const [speed, setSpeed] = useState(10)
   const [activeLayer, setActiveLayer] = useState<LayerKey>('footTraffic')
   const [selectedLocation, setSelectedLocation] = useState('B')
-  const [socketStatus, setSocketStatus] = useState<'connecting' | 'live' | 'offline'>('connecting')
+  const [polling, setPolling] = useState(false)
   const [error, setError] = useState('')
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
   const [aiBrief, setAiBrief] = useState<{ provider: string; content: string; used_fallback: boolean } | null>(null)
@@ -54,24 +54,25 @@ function App() {
   useEffect(() => {
     if (view !== 'simulation') return
     let disposed = false
-    let retry: ReturnType<typeof window.setTimeout> | undefined
-    let socket: WebSocket | undefined
-    const connect = () => {
+    let timer: ReturnType<typeof setInterval> | undefined
+    const tick = async () => {
       if (disposed) return
-      setSocketStatus('connecting')
-      socket = openSimulationSocket(setSnapshot, () => {
-        setSocketStatus('offline')
-        if (!disposed) retry = window.setTimeout(connect, 1800)
-      })
-      socket.onopen = () => setSocketStatus('live')
+      try {
+        const fresh = await getSnapshot()
+        setSnapshot(fresh)
+        setPolling(true)
+      } catch {
+        setPolling(false)
+      }
     }
-    connect()
+    const interval = speed === 1 ? 1000 : speed === 10 ? 100 : 50
+    timer = setInterval(tick, interval)
+    tick()
     return () => {
       disposed = true
-      if (retry) window.clearTimeout(retry)
-      socket?.close()
+      if (timer) clearInterval(timer)
     }
-  }, [view])
+  }, [view, speed])
 
   useEffect(() => {
     if (view === 'setup') return
@@ -154,7 +155,7 @@ function App() {
             <div className="sidebar-rule" />
             <div className="sidebar-label">SIMULATION</div>
             <div className="day-card"><div><span>SIMULATED DAY</span><strong>DAY {snapshot?.day ?? 1}<small> / 30</small></strong></div><div className="mini-progress"><span style={{ width: `${snapshot?.progress ?? 0}%` }} /></div></div>
-            <div className="sidebar-foot"><div className="system-status"><span className={`status-dot ${socketStatus}`} /> Engine {socketStatus === 'live' ? 'connected' : socketStatus}</div><span className="version">v0.1 MVP</span></div>
+            <div className="sidebar-foot"><div className="system-status"><span className={`status-dot ${polling ? 'live' : 'offline'}`} /> Engine {polling ? 'polling' : 'offline'}</div><span className="version">v0.1 MVP</span></div>
           </aside>
           {error && <div className="error-banner">{error}</div>}
           {view === 'simulation' ? <Simulation snapshot={snapshot} selectedMetric={selectedMetric} selectedLocation={selectedLocation} setSelectedLocation={setSelectedLocation} activeLayer={activeLayer} setActiveLayer={setActiveLayer} speed={speed} setSpeed={updateSpeed} toggleSimulation={toggleSimulation} resetSimulation={resetSimulation} setView={setView} aiStatus={aiStatus} /> : <Report snapshot={snapshot} bestLocation={bestLocation} brand={config.brand_name} setView={setView} aiStatus={aiStatus} aiBrief={aiBrief} />}

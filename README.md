@@ -5,7 +5,7 @@ A full-stack location intelligence prototype for retail expansion decisions. Con
 ## Stack
 
 - **Frontend:** React, TypeScript, Vite, Lucide icons, CSS design system
-- **Backend:** Python 3.13+, FastAPI, Pydantic, WebSockets
+- **Backend:** Python 3.13+, FastAPI, Pydantic (runs as Vercel serverless functions)
 - **Simulation:** seeded deterministic consumer cohort engine; 10,000 synthetic consumers represented by a performant visual sample
 
 ## Run locally
@@ -38,13 +38,12 @@ The Vite dev server proxies /api and /ws to FastAPI. The backend has interactive
 
 - Setup wizard validates a retail concept, operating strategy, test locations, and marketing channels.
 - FastAPI validates scenarios with Pydantic and returns a deterministic simulation snapshot.
-- WebSocket /ws/simulation streams movement, KPIs, consumer posts, and competitor events.
 - The dashboard supports 1x, 10x, and 100x speed controls, pause/start/reset, location selection, and visual layers.
 - Executive report turns the simulated results into a location recommendation.
 
 ## Optional AI provider integration
 
-The backend now supports all five providers through a single server-side adapter:
+The backend supports all five providers through a single server-side adapter:
 
 - Groq -- OpenAI-compatible chat completions
 - OpenRouter -- OpenAI-compatible chat completions
@@ -52,56 +51,54 @@ The backend now supports all five providers through a single server-side adapter
 - Gemini -- generateContent
 - Cohere -- v2 chat
 
-Copy backend/.env.example to backend/.env and fill in credentials locally. Never put provider keys in React/Vite environment variables, source files, screenshots, commits, or a public GitHub repository. The adapter supports the provider names from the request as migration aliases, but server-side variables such as GROQ_API_KEY are preferred.
+The frontend shows whether the simulation is deterministic or AI-enabled through /api/ai/status. /api/ai/generate uses the configured provider automatically and falls back to deterministic insight when no key is configured or a provider request fails.
 
-The frontend shows whether the simulation is deterministic or AI-enabled through /api/ai/status. /api/ai/generate uses the configured provider automatically and falls back to deterministic insight when no key is configured or a provider request fails. A provider outage therefore cannot stop the simulation.
+## Vercel deployment
 
-## Deployment
+Everything runs on Vercel. The frontend is a React SPA served as static files. The backend is a Python FastAPI serverless function in `api/main.py`.
 
-The React frontend is Vercel-ready: build with npm run build from frontend, and the included vite.config.ts handles local API proxying. The FastAPI service should be deployed separately to a WebSocket-capable host such as Railway, Render, Fly.io, or Cloud Run. Standard Vercel Serverless Functions are not a suitable host for the current long-lived simulation WebSocket.
+### Setup
 
-### Render deployment
-
-The render.yaml Blueprint uses `cd backend &&` in both the build and start commands so it works regardless of the Root Directory setting. To deploy:
-
-1. Create a new Render Blueprint service from this repository, or
-2. Create a manual Web Service with these exact settings:
-
-| Setting | Value |
-|---|---|
-| Root Directory | Leave blank |
-| Build Command | `cd backend && pip install -r requirements.txt` |
-| Start Command | `cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| Health Check Path | `/api/health` |
-
-If you prefer to use Root Directory `backend` instead, clear the Root Directory and use these commands without `cd backend &&`:
-
-| Setting | Value |
-|---|---|
-| Root Directory | `backend` |
-| Build Command | `pip install -r requirements.txt` |
-| Start Command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-
-**Do not combine** both approaches (e.g. Root Directory `backend` plus `--app-dir backend`).
-
-### Vercel frontend
-
-For production frontend hosting, set this Vercel variable:
+1. Push this repository to GitHub
+2. Import the project in Vercel (https://vercel.com/new)
+3. Vercel will auto-detect the configuration from `vercel.json`
+4. Add these environment variables in Vercel:
 
 ```
-VITE_API_BASE_URL=https://your-render-service.onrender.com
+EXPO_PUBLIC_GROQ_API_KEY=gsk_...
+EXPO_PUBLIC_OPENROUTER_API_KEY=sk-or-...
+EXPO_PUBLIC_GEMINI_API_KEY=AQ...
+EXPO_PUBLIC_NVIDIA_NIM_API_KEY=nvapi-...
+EXPO_PUBLIC_COHERE_API_KEY=cohere_...
 ```
 
-Set this Render variable to the exact Vercel origin (for example `https://retail-twin.vercel.app`):
+5. Deploy
 
+### Environment variables
+
+All API keys live in Vercel environment variables. The `EXPO_PUBLIC_*` prefix ensures they are available to the serverless Python functions. The backend reads both `EXPO_PUBLIC_GROQ_API_KEY` and `GROQ_API_KEY` forms, so either naming convention works.
+
+### How it works
+
+- `vercel.json` configures the build and routing
+- `api/main.py` is a Python serverless function that handles all /api/* routes
+- `frontend/` is built as a React SPA and served as static files
+- The simulation uses HTTP polling (GET /api/snapshot) instead of WebSocket, since Vercel serverless functions do not support long-lived connections
+
+### Local development
+
+For local development, the `backend/` directory contains a standalone FastAPI app with WebSocket support. The `api/` directory is the Vercel-optimized version.
+
+```bash
+# Backend (local)
+cd backend && uvicorn app.main:app --reload --port 8000
+
+# Frontend (local)
+cd frontend && npm run dev
 ```
-FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
-```
 
-The backend CORS configuration keeps localhost enabled for development and adds FRONTEND_ORIGIN in production. Keep AI keys only in Render secret manager.
-
-After the backend is healthy, open `https://your-render-service.onrender.com/api/health`; it must return JSON before the frontend Press Play action can work.
+The frontend `api.ts` uses `VITE_API_BASE_URL` to set the API origin. For local development, leave it empty and use the Vite proxy. For Vercel production, set it to your Vercel deployment URL.
 
 ## Security note
 
-The credentials pasted into chat should be considered exposed. Rotate/revoke all five keys in their provider consoles before using them in production. This repository intentionally contains placeholders only.
+Never commit API keys to git. Use Vercel environment variables for all provider credentials.
